@@ -11,28 +11,83 @@ the gallery, with no install, no store, and no platform code.
 from __future__ import annotations
 
 import base64
+import json
+import logging
 import os
+import sys
 import tempfile
+import time
 from collections import Counter
 
 import cv2
 
 from . import verify
-from .cli import ROTATIONS, solve
+from .cli import ROTATIONS, solve, solve_steps
 
 try:
-    from flask import Flask, jsonify, request
+    from flask import Flask, g, jsonify, request
 except ModuleNotFoundError as exc:  # pragma: no cover - import-time guard
     raise SystemExit(
         "the web UI needs Flask: pip install -e '.[web]'"
     ) from exc
 
-# Phone photos run 2-8MB; 30 is generous without inviting an accidental DoS
-# from a device that decides to upload a burst.
-MAX_UPLOAD = 30 * 1024 * 1024
+# A modern phone camera is the thing uploading here: an S24 Ultra at full
+# resolution produces files well past the 30MB this used to allow, and the
+# rejection looked like "nothing happened" from the phone.
+MAX_UPLOAD = 96 * 1024 * 1024
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD
+
+# Log every request. Without this the service logged only start/stop, so an
+# upload that never arrived and an upload that failed silently were
+# indistinguishable -- there was no way to tell whether the phone had reached
+# the server at all.
+logging.basicConfig(
+    stream=sys.stdout,
+    level=logging.INFO,
+    format="%(asctime)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("cowfinder.web")
+
+
+@app.before_request
+def _start_timer():
+    g._t0 = time.monotonic()
+    if request.path != "/":
+        log.info(
+            "-> %s %s from %s  content-length=%s",
+            request.method, request.path, request.remote_addr,
+            request.content_length,
+        )
+
+
+@app.after_request
+def _log_result(resp):
+    dt = (time.monotonic() - getattr(g, "_t0", time.monotonic())) * 1000
+    log.info("<- %s %s %s  %.0fms", request.method, request.path, resp.status_code, dt)
+    return resp
+
+
+@app.errorhandler(413)
+def _too_big(_e):
+    """Flask aborts oversized uploads before the view runs, and its default
+    response is HTML -- which the page could not parse, so the phone showed
+    nothing at all."""
+    log.warning("413 upload too large (limit %d bytes)", MAX_UPLOAD)
+    return jsonify(
+        error="that photo is larger than %d MB. Try your camera's smaller "
+              "resolution setting." % (MAX_UPLOAD // (1024 * 1024))
+    ), 413
+
+
+@app.errorhandler(Exception)
+def _unhandled(e):
+    """Anything unexpected must still come back as JSON with a reason; an HTML
+    500 page is unparseable by the client and surfaces as silence."""
+    log.exception("unhandled error")
+    return jsonify(error="%s: %s" % (type(e).__name__, e)), 500
 
 
 PAGE = """<!doctype html>
@@ -67,6 +122,12 @@ PAGE = """<!doctype html>
         font-variant-numeric:tabular-nums;color:var(--dim)}
   .dirs b{color:var(--text)}
   img{width:100%;border-radius:10px;display:block}
+  /* The canvas must sit exactly over the photo, so both are sized by the same
+     wrapper rather than each finding its own dimensions. */
+  .shot{position:relative;line-height:0}
+  .shot canvas{position:absolute;inset:0;width:100%;height:100%}
+  .counter{position:sticky;top:0;z-index:2}
+  .stagewrap{padding:.5rem}
   pre{overflow-x:auto;font:12px/1.35 ui-monospace,Menlo,Consolas,monospace;
       color:var(--dim);margin:0}
   .warn{color:var(--warn)}
@@ -98,26 +159,111 @@ PAGE = """<!doctype html>
   </div>
 
   <p id="status" class="spin hide"></p>
-  <div id="out" class="hide">
-    <div class="card">
-      <div class="big"><span id="n">0</span> <span style="font-size:1rem;font-weight:400;color:var(--dim)">found</span></div>
+
+  <div id="live" class="hide">
+    <div class="card counter">
+      <div class="big"><span id="n">0</span>
+        <span style="font-size:1rem;font-weight:400;color:var(--dim)">found</span></div>
       <div class="dirs" id="bydir"></div>
       <p id="unc" class="warn hide" style="margin:.75rem 0 0;font-size:.9rem"></p>
     </div>
-    <div class="card"><img id="ann" alt="Annotated grid with each hit marked"></div>
-    <div class="card"><pre id="grid"></pre></div>
+    <div class="card stagewrap">
+      <!-- the photo, with the overlay canvas sitting exactly on top of it -->
+      <div class="shot">
+        <img id="shot" alt="The photo you sent">
+        <canvas id="ov"></canvas>
+      </div>
+    </div>
+    <div class="card hide" id="gridcard"><pre id="grid"></pre></div>
   </div>
 </main>
 <script>
-  var status = document.getElementById("status");
-  var out = document.getElementById("out");
+(function () {
+  "use strict";
+  // Everything lives in an IIFE. A top-level `var status = <element>` collided
+  // with window.status -- a legacy DOM property that only holds strings -- so
+  // the element was coerced away and send() threw on its first line, before
+  // the upload. The picker opened, a photo was chosen, and nothing happened.
+  var statusEl = document.getElementById("status");
+  var liveEl = document.getElementById("live");
+  var shot = document.getElementById("shot");
+  var ov = document.getElementById("ov");
+  var nEl = document.getElementById("n");
+  var byDirEl = document.getElementById("bydir");
+  var uncEl = document.getElementById("unc");
+  var gridCard = document.getElementById("gridcard");
+  var gridEl = document.getElementById("grid");
+
+  // One colour per direction, so a glance at the overlay tells you which way a
+  // word runs without reading any labels.
+  var COLOR = {
+    "→": "#ffcf4d", "←": "#ff9a5c",
+    "↓": "#5fd08a", "↑": "#4dd4e8",
+    "↘": "#7aa7ff", "↙": "#c58cff",
+    "↗": "#ff7ab8", "↖": "#8fe36b"
+  };
+
+  function fail(msg) {
+    statusEl.className = "err";
+    statusEl.classList.remove("hide");
+    statusEl.textContent = msg;
+  }
+
+  function say(msg) {
+    statusEl.className = "spin";
+    statusEl.classList.remove("hide");
+    statusEl.textContent = msg;
+  }
+
+  // The canvas is sized to the IMAGE's pixels, not the screen's, so hit boxes
+  // arrive in the same coordinate space the server measured them in. CSS then
+  // scales both together and the overlay can never drift from the photo.
+  function fitCanvas(w, h) {
+    ov.width = w;
+    ov.height = h;
+    return ov.getContext("2d");
+  }
+
+  function drawHit(ctx, hit) {
+    var col = COLOR[hit.dir] || "#ffffff";
+    var b, i, cx = [], cy = [];
+    ctx.lineWidth = Math.max(2, ov.width / 400);
+    ctx.strokeStyle = col;
+    ctx.fillStyle = col;
+
+    for (i = 0; i < hit.boxes.length; i++) {
+      b = hit.boxes[i];
+      ctx.globalAlpha = 0.25;
+      ctx.fillRect(b[0], b[1], b[2], b[3]);
+      ctx.globalAlpha = 1;
+      ctx.strokeRect(b[0], b[1], b[2], b[3]);
+      cx.push(b[0] + b[2] / 2);
+      cy.push(b[1] + b[3] / 2);
+    }
+    // a line through the word makes the direction readable at a glance
+    ctx.globalAlpha = 0.9;
+    ctx.beginPath();
+    ctx.moveTo(cx[0], cy[0]);
+    ctx.lineTo(cx[cx.length - 1], cy[cy.length - 1]);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
 
   function send(file) {
     if (!file) return;
-    out.classList.add("hide");
-    status.classList.remove("hide");
-    status.className = "spin";
-    status.textContent = "Reading the grid…";
+    var ctx = null;
+
+    // Show their photo immediately, before a byte is uploaded. The solve can
+    // take seconds on a large image and a blank screen reads as broken.
+    var localURL = URL.createObjectURL(file);
+    shot.src = localURL;
+    ov.width = ov.height = 0;
+    liveEl.classList.remove("hide");
+    gridCard.classList.add("hide");
+    nEl.textContent = "0";
+    byDirEl.innerHTML = "";
+    uncEl.classList.add("hide");
+    say("Uploading " + (Math.round(file.size / 1048576 * 10) / 10) + " MB…");
 
     var fd = new FormData();
     fd.append("photo", file);
@@ -125,37 +271,89 @@ PAGE = """<!doctype html>
     fd.append("directions", document.getElementById("dirs").value);
     fd.append("rotate", document.getElementById("rot").value);
 
-    fetch("solve", { method: "POST", body: fd })
-      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
-      .then(function (res) {
-        if (!res.ok) throw new Error(res.j.error || "failed");
-        var j = res.j;
-        document.getElementById("n").textContent = j.count;
-        document.getElementById("bydir").innerHTML =
-          Object.keys(j.by_direction).map(function (k) {
-            return "<span>" + k + " <b>" + j.by_direction[k] + "</b></span>";
-          }).join("");
-        var u = document.getElementById("unc");
-        if (j.uncertain) {
-          u.textContent = j.uncertain + " more depend on a glyph that could not be read"
-                        + " — not counted above.";
-          u.classList.remove("hide");
-        } else { u.classList.add("hide"); }
-        document.getElementById("ann").src = "data:image/jpeg;base64," + j.annotated;
-        document.getElementById("grid").textContent =
-          "rotation " + j.rotation + "°, skew " + j.skew + "°, grid "
-          + j.rows + "×" + j.cols + "\n\n" + j.grid;
-        status.classList.add("hide");
-        out.classList.remove("hide");
+    var counts = {};
+    var found = 0;
+
+    fetch("solve/stream", { method: "POST", body: fd })
+      .then(function (r) {
+        if (!r.ok || !r.body) {
+          return r.text().then(function (t) {
+            var j = null;
+            try { j = JSON.parse(t); } catch (_) {}
+            throw new Error((j && j.error) || ("server returned " + r.status));
+          });
+        }
+        var reader = r.body.getReader();
+        var dec = new TextDecoder();
+        var buf = "";
+
+        function pump() {
+          return reader.read().then(function (res) {
+            if (res.done) { return; }
+            buf += dec.decode(res.value, { stream: true });
+            var lines = buf.split("\n");
+            buf = lines.pop();                 // keep the partial line
+            lines.forEach(function (line) {
+              if (!line.trim()) return;
+              var ev;
+              try { ev = JSON.parse(line); } catch (_) { return; }
+              handle(ev);
+            });
+            return pump();
+          });
+        }
+        return pump();
       })
-      .catch(function (e) {
-        status.className = "err";
-        status.textContent = e.message;
-      });
+      .catch(function (e) { fail(e.message || String(e)); })
+      .then(function () { URL.revokeObjectURL(localURL); });
+
+    function handle(ev) {
+      if (ev.type === "stage") {
+        say(ev.text + "…");
+      } else if (ev.type === "error") {
+        fail(ev.error);
+      } else if (ev.type === "image") {
+        // swap the local preview for the upright image the server actually
+        // solved, so the overlay lines up with what was measured
+        shot.src = "data:image/jpeg;base64," + ev.jpeg;
+        ctx = fitCanvas(ev.width, ev.height);
+        say("Marking hits…");
+      } else if (ev.type === "hit") {
+        found = ev.n;
+        nEl.textContent = found;
+        counts[ev.dir] = (counts[ev.dir] || 0) + 1;
+        byDirEl.innerHTML = Object.keys(counts).map(function (k) {
+          return "<span style=\"color:" + (COLOR[k] || "#fff") + "\">" + k
+               + " <b>" + counts[k] + "</b></span>";
+        }).join("");
+        if (ctx) drawHit(ctx, ev);
+      } else if (ev.type === "grid") {
+        gridEl.textContent = "grid " + ev.rows + "×" + ev.cols
+                           + ", skew " + ev.skew + "°";
+      } else if (ev.type === "done") {
+        nEl.textContent = ev.count;
+        if (ev.uncertain) {
+          uncEl.textContent = ev.uncertain + " more depend on a glyph that could not"
+                            + " be read — not counted above.";
+          uncEl.classList.remove("hide");
+        }
+        gridEl.textContent = "rotation " + ev.rotation + "°, "
+                           + gridEl.textContent;
+        gridCard.classList.remove("hide");
+        statusEl.classList.add("hide");
+      }
+    }
   }
+
+  // A phone has no console, so a silent script error is indistinguishable from
+  // a dead app. Put it on the screen.
+  window.addEventListener("error", function (ev) {
+    fail("page error: " + (ev.message || "unknown"));
+  });
 
   document.getElementById("cam").addEventListener("change", function () { send(this.files[0]); });
   document.getElementById("lib").addEventListener("change", function () { send(this.files[0]); });
+})();
 </script>
 """
 
@@ -220,6 +418,99 @@ def solve_upload():
         grid=ascii_grid,
         annotated=base64.b64encode(buf.tobytes()).decode("ascii"),
     )
+
+
+MAX_PREVIEW_W = 1400  # a phone screen; full 4000px would be pointless bytes
+
+
+def _encode_preview(bgr):
+    """Upright image, scaled to something a phone should receive, plus the scale."""
+    h, w = bgr.shape[:2]
+    scale = min(1.0, MAX_PREVIEW_W / float(w))
+    if scale < 1.0:
+        bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)),
+                         interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 78])
+    if not ok:
+        raise RuntimeError("could not encode the preview")
+    return base64.b64encode(buf.tobytes()).decode("ascii"), scale, bgr.shape[1], bgr.shape[0]
+
+
+@app.post("/solve/stream")
+def solve_stream():
+    """Newline-delimited JSON, one object per event, flushed as it happens.
+
+    The overlay is drawn on the CLIENT from geometry rather than baked into a
+    server-side image. Two reasons: the count can tick up as hits appear, and
+    the boxes stay in the upright image's own coordinate space -- SPEC's
+    coordinate cheat sheet exists because transforming them by hand is where
+    the bugs lived.
+    """
+    f = request.files.get("photo")
+    if f is None or not f.filename:
+        return jsonify(error="no photo was sent"), 400
+    word = (request.form.get("word") or "COW").strip()
+    directions = request.form.get("directions") or "all"
+    rotate = request.form.get("rotate") or "auto"
+    if directions not in ("all", "horizontal", "forward"):
+        return jsonify(error="directions must be 'all', 'horizontal' or 'forward'"), 400
+    if rotate not in ROTATIONS:
+        return jsonify(error="rotate must be one of %s" % ", ".join(ROTATIONS)), 400
+
+    suffix = os.path.splitext(f.filename)[1][:8] or ".jpg"
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    f.save(tmp)
+    tmp.close()
+
+    def events():
+        try:
+            solved = None
+            for kind, payload in solve_steps(tmp.name, word, directions, rotate):
+                if kind == "done":
+                    solved = payload
+                    break
+                yield json.dumps({"type": kind, **payload}) + "\n"
+
+            preview, scale, pw, ph = _encode_preview(solved.bgr)
+            yield json.dumps({"type": "image", "jpeg": preview,
+                              "width": pw, "height": ph}) + "\n"
+
+            # One event per hit so the counter climbs as they are drawn.
+            for i, (cells, sym) in enumerate(sorted(solved.hits), 1):
+                boxes = []
+                for p in cells:
+                    x, y, w, h = solved.boxes[p]
+                    boxes.append([round(x * scale), round(y * scale),
+                                  round(w * scale), round(h * scale)])
+                yield json.dumps({"type": "hit", "n": i, "dir": sym,
+                                  "cells": [list(p) for p in cells],
+                                  "boxes": boxes}) + "\n"
+
+            yield json.dumps({
+                "type": "done",
+                "count": len(solved.hits),
+                "uncertain": len(solved.uncertain),
+                "by_direction": dict(sorted(Counter(s for _c, s in solved.hits).items())),
+                "rotation": solved.rotation,
+                "skew": round(float(solved.skew), 1),
+            }) + "\n"
+        except SystemExit as exc:
+            # Headers are already sent, so the status code cannot change --
+            # the error has to travel as an event or it vanishes.
+            yield json.dumps({"type": "error", "error": str(exc)}) + "\n"
+        except Exception as exc:  # pragma: no cover - defensive
+            log.exception("stream failed")
+            yield json.dumps({"type": "error",
+                              "error": "%s: %s" % (type(exc).__name__, exc)}) + "\n"
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+
+    return app.response_class(events(), mimetype="application/x-ndjson",
+                              headers={"X-Accel-Buffering": "no",
+                               "Cache-Control": "no-store"})
 
 
 def main() -> None:
