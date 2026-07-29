@@ -360,7 +360,18 @@ PAGE = """<!doctype html>
 
 @app.get("/")
 def index():
-    return PAGE
+    """The page, explicitly uncacheable.
+
+    Served with no Cache-Control, ETag or Last-Modified, a browser has no
+    validator and falls back to heuristic caching -- so a phone kept showing a
+    page from before the deploy and every fix looked like it had done nothing.
+    The HTML is a few KB and carries the app's only JavaScript; there is no
+    reason to cache it and every reason not to.
+    """
+    resp = app.make_response(PAGE)
+    resp.headers["Cache-Control"] = "no-store, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @app.post("/solve")
