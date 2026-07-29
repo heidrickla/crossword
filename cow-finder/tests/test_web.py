@@ -5,6 +5,8 @@ its absence must never fail the core suite.
 """
 import base64
 import io
+import os
+import re
 from pathlib import Path
 
 import pytest
@@ -20,6 +22,57 @@ PHOTO = Path(__file__).parent / "golden_photo.jpg"
 def client():
     web.app.config["TESTING"] = True
     return web.app.test_client()
+
+
+def _script_of(client):
+    import re
+    html = client.get("/").get_data(as_text=True)
+    m = re.search(r"<script>(.*?)</script>", html, re.S)
+    assert m, "no <script> block in the page"
+    return m.group(1)
+
+
+def test_javascript_has_no_string_broken_across_a_newline(client):
+    """PAGE was a non-raw triple-quoted string, so Python ate the backslash in
+    the JavaScript's "\\n" and left a real newline inside a string literal --
+    a script-wide SyntaxError. Nothing ran, no listener registered, and no
+    request ever left the phone. The file picker still worked, because a
+    <label> around <input type=file> needs no JavaScript, so the page looked
+    alive while being completely dead.
+    """
+    for i, line in enumerate(_script_of(client).splitlines(), 1):
+        code = line.split("//", 1)[0]
+        unescaped = len(re.sub(r'\\.', "", code).split('"')) - 1
+        assert unescaped % 2 == 0, (
+            f"line {i} has an unterminated string literal: {line.strip()[:80]!r}"
+        )
+
+
+def test_javascript_parses(client):
+    """Belt and braces: if node is available, actually parse it."""
+    import shutil
+    import subprocess
+    import tempfile
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    js = _script_of(client)
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                     encoding="utf-8") as fh:
+        fh.write(js)
+        path = fh.name
+    try:
+        r = subprocess.run([node, "--check", path], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr[:600]
+    finally:
+        os.unlink(path)
+
+
+def test_escapes_survive_into_the_page(client):
+    """The two escapes Python was silently consuming."""
+    js = _script_of(client)
+    assert r'split("\n")' in js, "the newline escape was eaten again"
+    assert r'\"color:' in js or r'\"' in js, "escaped quotes were eaten again"
 
 
 def test_page_is_not_cacheable(client):
