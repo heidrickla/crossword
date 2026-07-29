@@ -22,6 +22,15 @@ def client():
     return web.app.test_client()
 
 
+def test_page_is_not_cacheable(client):
+    """Without a Cache-Control header the page has no validator at all, so a
+    browser applies heuristic caching and keeps showing a build from before the
+    deploy -- which looks exactly like the fix not working."""
+    r = client.get("/")
+    cc = r.headers.get("Cache-Control", "")
+    assert "no-store" in cc, f"Cache-Control was {cc!r}"
+
+
 def test_page_offers_the_camera(client):
     """The camera path is the whole point: a plain file input would make the
     phone open the gallery instead of the camera."""
