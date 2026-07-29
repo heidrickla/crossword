@@ -90,7 +90,7 @@ def _unhandled(e):
     return jsonify(error="%s: %s" % (type(e).__name__, e)), 500
 
 
-PAGE = """<!doctype html>
+PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>COW finder</title>
