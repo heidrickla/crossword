@@ -67,7 +67,28 @@ def validate_word(word: str) -> str:
 
 
 def solve(path: str, word: str, directions: str, rotate: str = "auto") -> Solved:
+    """Run the pipeline and return the result.
+
+    Thin wrapper over solve_steps so there is exactly one implementation: a
+    second copy written for progress reporting would drift from this one, and
+    the golden answer would then depend on which path the caller took.
+    """
+    for kind, payload in solve_steps(path, word, directions, rotate):
+        if kind == "done":
+            return payload
+    raise SystemExit("pipeline produced no result")  # pragma: no cover
+
+
+def solve_steps(path: str, word: str, directions: str, rotate: str = "auto"):
+    """Yield ``(kind, payload)`` as the pipeline progresses, then ``("done", Solved)``.
+
+    Progress exists because the slow part is invisible: orientation detection
+    alone segments and classifies the page four times, so a phone can sit for
+    seconds with nothing to look at. Stages are emitted where real time is
+    spent, not on a timer.
+    """
     word = validate_word(word)
+    yield "stage", {"step": "reading", "text": "Reading the photo"}
 
     bgr = cv2.imread(path)
     if bgr is None:
@@ -77,10 +98,13 @@ def solve(path: str, word: str, directions: str, rotate: str = "auto") -> Solved
     # Orientation is the single most consequential guess in the pipeline, so
     # allow it to be overridden. Auto-detection is a heuristic over a glyph
     # sample; without an escape hatch a misdetect leaves no way forward.
+    yield "stage", {"step": "orienting", "text": "Working out which way up"}
     deg = orient.best_rotation(gray) if rotate == "auto" else int(rotate)
     gray = orient.apply_rotation(gray, deg)
     bgr = orient.apply_rotation(bgr, deg)
+    yield "rotation", {"degrees": deg}
 
+    yield "stage", {"step": "segmenting", "text": "Finding the letters"}
     th = binarize(gray)
     boxes = find_glyphs(th)
     if not boxes:
@@ -89,8 +113,11 @@ def solve(path: str, word: str, directions: str, rotate: str = "auto") -> Solved
             "Usually the photo is blank, cropped past the grid, or so unevenly "
             "lit that thresholding kept nothing." % path
         )
+    yield "stage", {"step": "classifying", "text": "Reading %d letters" % len(boxes),
+                    "glyphs": len(boxes)}
     cells = [(classify(th, b), b) for b in boxes]
 
+    yield "stage", {"step": "gridding", "text": "Straightening the grid"}
     centers = np.array([(b[0] + b[2] / 2, b[1] + b[3] / 2) for _, b in cells])
     angle = gridify.deskew_angle(centers)
     rows = gridify.cluster_rows(cells, angle)
@@ -105,20 +132,30 @@ def solve(path: str, word: str, directions: str, rotate: str = "auto") -> Solved
             "a grid and is not extremely skewed." % len(boxes)
         )
 
+    yield "grid", {"rows": max(r for r, _ in grid) + 1,
+                   "cols": max(c for _, c in grid) + 1,
+                   "skew": round(float(angle), 1)}
+
     dirs = {
         "all": search.DIRS,              # 8 ways: both along rows, columns, and each diagonal
         "horizontal": search.HORIZONTAL,  # -> and <-
         "forward": search.HORIZONTAL_ONLY,  # -> only
     }[directions]
+    yield "stage", {"step": "searching", "text": "Searching %s" % (
+        "all 8 directions" if directions == "all" else directions)}
     hits, uncertain = search.find_word(grid, word, dirs)
 
+    # Verification before any hit is announced. Reporting hits and then
+    # retracting them would be worse than waiting: SPEC section 7 exists
+    # because coordinate bugs produced confident, wrong answers.
+    yield "stage", {"step": "verifying", "text": "Re-checking %d hits" % len(hits)}
     bad = verify.reverify(th, gboxes, hits, word)
     if bad:
         for (hit, s) in bad:
             print(f"VERIFY FAIL {hit} -> {s}", file=sys.stderr)
         raise SystemExit("independent re-verification failed; refusing to report")
 
-    return Solved(bgr, th, grid, gboxes, hits, uncertain, deg, angle)
+    yield "done", Solved(bgr, th, grid, gboxes, hits, uncertain, deg, angle)
 
 
 def _write(img, path: str, label: str) -> None:

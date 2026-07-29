@@ -34,9 +34,21 @@ Standard ports work; treat high ports as unreachable from the phone.
 
 A single page with **Take photo** and **Choose photo**. The camera button uses
 `capture="environment"`, so Android opens the camera directly rather than the
-gallery. Results come back as the count by direction, the annotated grid, and
-the reconstructed ASCII grid; anything resting on an unreadable glyph is
-reported separately and never folded into the count.
+gallery.
+
+Your photo appears immediately, before a byte is uploaded. `POST /solve/stream`
+then returns newline-delimited JSON as the work happens — a stage per real step
+(orienting, segmenting, classifying, gridding, searching, verifying), then the
+upright image, then **one event per hit**. The page draws each hit onto a canvas
+over the photo, colour-coded by direction, with the counter climbing as they
+land. Anything resting on an unreadable glyph is reported separately and never
+folded into the count.
+
+The overlay is drawn client-side from geometry rather than baked into a
+server-rendered image: the boxes stay in the coordinate space the server
+measured them in, which is where `docs/SPEC.md`'s coordinate bugs used to live.
+`POST /solve` still returns a single JSON blob with a flattened annotated image
+for non-interactive use; a test asserts the two endpoints agree.
 
 The web extra is optional on purpose — the solver core stays `opencv` +
 `numpy`, so the CLI and the golden test never depend on a web stack.
