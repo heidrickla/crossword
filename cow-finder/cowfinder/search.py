@@ -12,6 +12,13 @@ DIRS = {
     (1, 1): "\u2198",  (1, -1): "\u2199",
     (-1, 1): "\u2197", (-1, -1): "\u2196",
 }
+#: Both ways along a row. Named for what it means: these puzzles contain
+#: backwards words, and an option called "horizontal" that quietly dropped the
+#: leftward ones would under-count without saying so. The golden photo has a
+#: leftward COW, so this is not hypothetical.
+HORIZONTAL = {(0, 1): "\u2192", (0, -1): "\u2190"}
+
+#: Kept so existing callers keep working; prefer HORIZONTAL.
 HORIZONTAL_ONLY = {(0, 1): "\u2192"}
 
 Hit = tuple[tuple[tuple[int, int], ...], str]  # (cells, dir symbol)
