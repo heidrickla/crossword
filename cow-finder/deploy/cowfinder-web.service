@@ -1,0 +1,25 @@
+[Unit]
+Description=COW finder phone front end
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=claude
+Group=claude
+WorkingDirectory=/home/claude/repos/crossword/cow-finder
+# The venv interpreter directly -- no shell, no activate, so the unit does not
+# depend on a login environment that a systemd service does not have.
+ExecStart=/home/claude/repos/crossword/cow-finder/.venv/bin/python -m cowfinder.web --host 0.0.0.0 --port 8420
+Restart=on-failure
+RestartSec=5
+
+# It only ever reads an uploaded photo from a temp file and writes nothing.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/claude/repos/crossword/cow-finder
+
+[Install]
+WantedBy=multi-user.target

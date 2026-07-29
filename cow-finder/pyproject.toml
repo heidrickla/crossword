@@ -7,9 +7,13 @@ dependencies = ["opencv-python-headless", "numpy"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+# Optional on purpose: the solver core stays opencv+numpy only, so the CLI and
+# the golden test never depend on a web stack being installed.
+web = ["flask", "waitress"]
 
 [project.scripts]
 cowfinder = "cowfinder.cli:main"
+cowfinder-web = "cowfinder.web:main"
 
 [build-system]
 requires = ["setuptools>=68"]
