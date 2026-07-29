@@ -19,6 +19,13 @@ import numpy as np
 RING_REL_STD = 0.30
 HOLE_AREA_FRAC = 0.05
 
+#: Every letter this classifier can emit. '?' is the explicit unknown and is
+#: never part of a searchable word. Callers validate requested words against
+#: LETTERS -- a word containing anything else cannot match by construction, and
+#: silently returning "0 found" reads as "not present" rather than "impossible".
+LETTERS = frozenset("CDOWM")
+CLASSES = frozenset(LETTERS | {"?"})
+
 
 def classify(th: np.ndarray, box: tuple[int, int, int, int]) -> str:
     x, y, w, h = box
