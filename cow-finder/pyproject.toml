@@ -1,0 +1,19 @@
+[project]
+name = "cowfinder"
+version = "0.1.0"
+description = "Word-search puzzle solver for COW grids from photos"
+requires-python = ">=3.11"
+dependencies = ["opencv-python-headless", "numpy"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+cowfinder = "cowfinder.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["cowfinder*"]
