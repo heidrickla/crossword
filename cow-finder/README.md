@@ -21,7 +21,16 @@ detection when it guesses wrong.
 ```
 pip install -e ".[web]"
 python -m cowfinder.web            # http://<host>:8420
+python -m cowfinder.web --port 80  # what the service unit runs
 ```
+
+**Use port 80 for anything a phone reaches over the VPN.** Verified 2026-07-29:
+from a phone on UniFi Teleport, `10.10.60.20:8420` times out while the same
+service on `:80` loads immediately — and the same `:8420` answers fine from
+hosts on another VLAN. Nothing on the host filters (no ufw, iptables ACCEPT),
+and no gateway policy names the address, subnet or port, so the block is
+somewhere in the Teleport path rather than anything configurable found so far.
+Standard ports work; treat high ports as unreachable from the phone.
 
 A single page with **Take photo** and **Choose photo**. The camera button uses
 `capture="environment"`, so Android opens the camera directly rather than the
