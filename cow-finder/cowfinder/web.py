@@ -90,7 +90,7 @@ PAGE = """<!doctype html>
   <div class="opts">
     <span>Word <input type="text" id="word" value="COW" size="5" autocapitalize="characters"></span>
     <span>Directions
-      <select id="dirs"><option value="all">All 8</option><option value="horizontal">Rightward only</option></select>
+      <select id="dirs"><option value="all">All 8 ways</option><option value="horizontal">Along rows, both ways</option><option value="forward">Rightward only</option></select>
     </span>
     <span>Rotation
       <select id="rot"><option>auto</option><option>0</option><option>90</option><option>180</option><option>270</option></select>
@@ -174,8 +174,8 @@ def solve_upload():
     word = (request.form.get("word") or "COW").strip()
     directions = request.form.get("directions") or "all"
     rotate = request.form.get("rotate") or "auto"
-    if directions not in ("all", "horizontal"):
-        return jsonify(error="directions must be 'all' or 'horizontal'"), 400
+    if directions not in ("all", "horizontal", "forward"):
+        return jsonify(error="directions must be 'all', 'horizontal' or 'forward'"), 400
     if rotate not in ROTATIONS:
         return jsonify(error="rotate must be one of %s" % ", ".join(ROTATIONS)), 400
 

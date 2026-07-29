@@ -1,8 +1,12 @@
 """cowfinder CLI.
 
-    python -m cowfinder.cli photo.jpg [--word COW] [--directions all|horizontal]
+    python -m cowfinder.cli photo.jpg [--word COW]
+                            [--directions all|horizontal|forward]
                             [--rotate auto|0|90|180|270]
                             [--out annotated.png] [--strips strips.png]
+
+Default is all 8 directions: left-to-right and right-to-left, up and down, and
+all four diagonals in both senses. These puzzles hide words backwards.
 """
 from __future__ import annotations
 
@@ -101,7 +105,11 @@ def solve(path: str, word: str, directions: str, rotate: str = "auto") -> Solved
             "a grid and is not extremely skewed." % len(boxes)
         )
 
-    dirs = search.HORIZONTAL_ONLY if directions == "horizontal" else search.DIRS
+    dirs = {
+        "all": search.DIRS,              # 8 ways: both along rows, columns, and each diagonal
+        "horizontal": search.HORIZONTAL,  # -> and <-
+        "forward": search.HORIZONTAL_ONLY,  # -> only
+    }[directions]
     hits, uncertain = search.find_word(grid, word, dirs)
 
     bad = verify.reverify(th, gboxes, hits, word)
@@ -132,7 +140,9 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="cowfinder")
     ap.add_argument("photo")
     ap.add_argument("--word", default="COW")
-    ap.add_argument("--directions", choices=["all", "horizontal"], default="all")
+    ap.add_argument("--directions", choices=["all", "horizontal", "forward"],
+                    default="all",
+                    help="all 8 ways (default), both ways along a row, or rightward only")
     ap.add_argument("--rotate", choices=ROTATIONS, default="auto",
                     help="override page-orientation detection (degrees clockwise)")
     ap.add_argument("--out", default=None, help="annotated image path")
