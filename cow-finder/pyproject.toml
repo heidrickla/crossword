@@ -3,6 +3,7 @@ name = "cowfinder"
 version = "0.1.0"
 description = "Word-search puzzle solver for COW grids from photos"
 requires-python = ">=3.11"
+license = {text = "MIT"}
 dependencies = ["opencv-python-headless", "numpy"]
 
 [project.optional-dependencies]
