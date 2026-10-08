@@ -16,6 +16,16 @@ where D is the backwards-C decoy and M the upside-down W), `--directions
 all|horizontal`, `--rotate auto|0|90|180|270` to override orientation
 detection when it guesses wrong.
 
+## Design constraints
+
+- `docs/SPEC.md` is the design document. It records the failure modes that were hit and fixed (OCR unusability, the 180° orientation trap, row merge under tilt, global x-clustering collapse, coordinate-transform off-by-ones); a simplification the spec names as an anti-pattern stays out.
+- The golden test: `tests/golden_photo.jpg` yields 31 COWs (9→ 1← 6↓ 10↘ 5↙) on a 32×20 grid with rotation 180 auto-detected. A change that alters this is a regression unless the golden answer itself is shown wrong.
+- The independent re-verification pass (`verify.reverify`) and the `?` uncertainty channel stay: ambiguity is reported, never guessed away.
+- No OCR dependency: classification is geometric (the spec says why).
+- One canonical coordinate space (the upright image), reached as early as possible; the spec's coordinate-transform cheat sheet is where most past bugs lived.
+- New capabilities (other words, other decoy alphabets, batch mode) are additive options; the default behaviour stays golden-test-stable.
+- `python -m pytest tests/` before and after a change.
+
 ## From a phone
 
 ```
