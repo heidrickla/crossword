@@ -26,6 +26,7 @@ from .cli import ROTATIONS, solve, solve_steps
 
 try:
     from flask import Flask, g, jsonify, request
+    from werkzeug.exceptions import HTTPException
 except ModuleNotFoundError as exc:  # pragma: no cover - import-time guard
     raise SystemExit(
         "the web UI needs Flask: pip install -e '.[web]'"
@@ -82,12 +83,18 @@ def _too_big(_e):
     ), 413
 
 
+# Exception text can carry paths and internals, so the client gets this and the log the detail.
+UNHANDLED = "the server hit an unexpected error; the reason is in its log"
+
+
 @app.errorhandler(Exception)
 def _unhandled(e):
-    """Anything unexpected must still come back as JSON with a reason; an HTML
-    500 page is unparseable by the client and surfaces as silence."""
+    """Anything unexpected must still come back as JSON; an HTML 500 page is
+    unparseable by the client and surfaces as silence."""
+    if isinstance(e, HTTPException):
+        return jsonify(error=e.name), e.code
     log.exception("unhandled error")
-    return jsonify(error="%s: %s" % (type(e).__name__, e)), 500
+    return jsonify(error=UNHANDLED), 500
 
 
 PAGE = r"""<!doctype html>
@@ -509,10 +516,9 @@ def solve_stream():
             # Headers are already sent, so the status code cannot change --
             # the error has to travel as an event or it vanishes.
             yield json.dumps({"type": "error", "error": str(exc)}) + "\n"
-        except Exception as exc:  # pragma: no cover - defensive
-            log.exception("stream failed")
-            yield json.dumps({"type": "error",
-                              "error": "%s: %s" % (type(exc).__name__, exc)}) + "\n"
+        except Exception as exc:
+            log.exception("stream failed: %s", type(exc).__name__)
+            yield json.dumps({"type": "error", "error": UNHANDLED}) + "\n"
         finally:
             try:
                 os.unlink(tmp.name)
@@ -528,7 +534,8 @@ def main() -> None:
     import argparse
 
     ap = argparse.ArgumentParser(prog="cowfinder-web")
-    ap.add_argument("--host", default="0.0.0.0")
+    # loopback unless asked: the service unit passes --host 0.0.0.0 for the LAN
+    ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8420)
     a = ap.parse_args()
     try:

@@ -290,3 +290,42 @@ def test_no_temp_files_left_behind(client, tmp_path, monkeypatch):
         data = {"photo": (io.BytesIO(fh.read()), "p.jpg")}
         client.post("/solve", data=data, content_type="multipart/form-data")
     assert list(tmp_path.iterdir()) == []
+
+
+def test_unexpected_errors_keep_their_text_in_the_log(client, monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("detail-from-/srv/internal")
+
+    monkeypatch.setattr(web, "solve", boom)
+    monkeypatch.setattr(web, "solve_steps", boom)
+    with open(PHOTO, "rb") as fh:
+        raw = fh.read()
+    r = client.post("/solve", data={"photo": (io.BytesIO(raw), "p.jpg")},
+                    content_type="multipart/form-data")
+    assert r.status_code == 500 and r.is_json
+    assert r.get_json()["error"] == web.UNHANDLED
+    s = client.post("/solve/stream", data={"photo": (io.BytesIO(raw), "p.jpg")},
+                    content_type="multipart/form-data")
+    body = s.get_data(as_text=True)
+    assert "detail-from" not in body and "RuntimeError" not in body
+    assert web.UNHANDLED in body
+
+
+def test_an_unknown_path_is_a_json_404(client):
+    r = client.get("/no-such-page")
+    assert r.status_code == 404 and r.get_json()["error"] == "Not Found"
+
+
+def test_the_server_binds_loopback_unless_told(monkeypatch):
+    import sys
+
+    import waitress
+
+    seen = {}
+    monkeypatch.setattr(waitress, "serve", lambda app, host, port: seen.update(host=host, port=port))
+    monkeypatch.setattr(sys, "argv", ["cowfinder-web"])
+    web.main()
+    assert seen == {"host": "127.0.0.1", "port": 8420}
+    monkeypatch.setattr(sys, "argv", ["cowfinder-web", "--host", "0.0.0.0", "--port", "80"])
+    web.main()
+    assert seen == {"host": "0.0.0.0", "port": 80}

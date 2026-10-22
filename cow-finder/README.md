@@ -30,8 +30,8 @@ detection when it guesses wrong.
 
 ```
 pip install -e ".[web]"
-python -m cowfinder.web            # http://<host>:8420
-python -m cowfinder.web --port 80  # what the service unit runs
+python -m cowfinder.web                           # http://127.0.0.1:8420
+python -m cowfinder.web --host 0.0.0.0 --port 80  # what the service unit runs
 ```
 
 **Use port 80 for anything a phone reaches over a VPN.** In testing, a phone on
