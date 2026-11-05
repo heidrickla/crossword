@@ -1,12 +1,9 @@
-# Weekly version-update PRs for the Python package and any GitHub Actions
-# workflows. Security alerts are separate and always on.
+# Weekly version-update PRs for the Python package. The repository has no
+# workflows, so there is no github-actions entry. Security alerts are separate
+# and always on.
 version: 2
 updates:
   - package-ecosystem: pip
     directory: /cow-finder
-    schedule:
-      interval: weekly
-  - package-ecosystem: github-actions
-    directory: /
     schedule:
       interval: weekly
