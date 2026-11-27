@@ -1,2 +1,2 @@
 # crossword
-Crossword -- personal project.
+Crossword, a personal project.
